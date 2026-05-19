@@ -1,0 +1,76 @@
+# consul-k8s Helm values for DC6 — admin partition dc6-k8s of datacenter dc4-esm.
+# Catalog sync only — K8s services are reflected into Consul's service catalog.
+# No connect inject, no mesh gateways, no sidecar proxies.
+# DC6 pairs with DC4's default partition in a sameness group for Scenario C failover.
+#
+# Install:
+#   helm install consul hashicorp/consul \
+#     --namespace consul --create-namespace \
+#     --version 1.6.x \
+#     -f k8s/dc6/consul-values.yaml \
+#     --kube-context dc6
+#
+# Replace DC4_SERVER_PUBLIC_IP before installing.
+
+global:
+  name: consul
+  datacenter: dc4-esm
+
+  adminPartitions:
+    enabled: true
+    name: dc6-k8s
+
+  image: "hashicorp/consul-enterprise:1.21.6-ent"
+
+  enableConsulNamespaces: true
+
+  acls:
+    manageSystemACLs: false
+
+  tls:
+    enabled: false
+
+  enterpriseLicense:
+    secretName: consul-ent-license
+    secretKey: key
+
+server:
+  enabled: false  # external servers — DC4 VMs
+
+externalServers:
+  enabled: true
+  hosts:
+    - "REPLACE_WITH_DC4_SERVER_IP"
+  httpPort: 8500
+  grpcPort: 8502
+  skipServerWatch: true
+
+client:
+  enabled: true
+  grpc: true
+  exposeGossipPorts: true
+
+# Connect inject disabled — catalog sync only, no sidecars.
+connectInject:
+  enabled: false
+
+meshGateway:
+  enabled: false
+
+terminatingGateways:
+  enabled: false
+
+controller:
+  enabled: false
+
+# Catalog sync: K8s Services → Consul catalog.
+# Services tagged with consul.hashicorp.com/service-sync: "true" are synced.
+syncCatalog:
+  enabled: true
+  default: false        # explicit opt-in via annotation
+  toConsul: true
+  toK8S: false
+  consulNodeName: "dc6-k8s-sync"
+
+ui:
+  enabled: false

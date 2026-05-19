@@ -1,0 +1,8 @@
+{
+  "Name": "product-api-local",
+  "Service": {
+    "Service": "product-api",
+    "Near": "_agent",
+    "OnlyPassing": true
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "Kind": "terminating-gateway",
+  "Name": "terminating-gateway",
+  "Services": [
+    { "Name": "product-api" },
+    { "Name": "postgres" },
+    { "Name": "payments" },
+    { "Name": "public-api" },
+    { "Name": "frontend" }
+  ]
+}

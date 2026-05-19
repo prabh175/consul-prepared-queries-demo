@@ -1,0 +1,31 @@
+# Consul mesh gateway for cross-region cluster peering.
+# Uses -wan-address so the peering token embeds the PUBLIC IP (required for inter-region).
+# REPLACE_WITH_PRIVATE_IP  = VPC private IP (LAN advertisement)
+# REPLACE_WITH_PUBLIC_IP   = EC2 public IP (WAN advertisement, embedded in peer token)
+#
+# Install: bootstrap scripts write this to /etc/systemd/system/mesh-gateway.service
+#          after substituting both placeholders.
+
+[Unit]
+Description=Consul Connect Mesh Gateway
+After=consul.service
+Wants=consul.service
+
+[Service]
+Type=simple
+User=consul
+Group=consul
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-/etc/consul.d/consul.env
+ExecStart=/usr/bin/consul connect envoy \
+  -gateway=mesh \
+  -register \
+  -service=mesh-gateway \
+  -address=REPLACE_WITH_PRIVATE_IP:8443 \
+  -wan-address=REPLACE_WITH_PRIVATE_IP:8443 \
+  -ignore-envoy-compatibility
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

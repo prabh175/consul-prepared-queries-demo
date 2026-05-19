@@ -1,0 +1,17 @@
+{
+  "Name": "product-api-hybrid",
+  "Service": {
+    "Service": "product-api",
+    "OnlyPassing": true,
+    "Failover": {
+      "Targets": [
+        {
+          "Peer": "dc4-peer",
+          "Service": "product-api"
+        }
+      ]
+    },
+    "Tags": [],
+    "Near": "_agent"
+  }
+}

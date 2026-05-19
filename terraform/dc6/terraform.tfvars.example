@@ -1,0 +1,20 @@
+# DC6 Terraform variables — copy to terraform.tfvars and fill in.
+# Run dc4 first: terraform -chdir=terraform/dc4 apply
+# Then export the outputs needed here:
+#
+#   dc4_vpc_id            = $(terraform -chdir=terraform/dc4 output -raw vpc_id)
+#   dc4_subnet_ids        = $(terraform -chdir=terraform/dc4 output -json subnet_ids)
+#   dc4_security_group_id = $(terraform -chdir=terraform/dc4 output -raw security_group_id)
+#
+# Also set enable_k8s_partition = true in terraform/dc4/terraform.tfvars before re-applying dc4.
+
+dc4_vpc_id            = "vpc-REPLACE"
+dc4_vpc_cidr          = "10.20.0.0/16"
+dc4_subnet_ids        = ["subnet-REPLACE-1", "subnet-REPLACE-2", "subnet-REPLACE-3"]
+dc4_security_group_id = "sg-REPLACE"
+
+operator_public_cidr  = "YOUR_IP/32"
+ssh_key_name          = "devops-keypair"
+
+node_instance_type    = "t3.small"
+eks_version           = "1.32"

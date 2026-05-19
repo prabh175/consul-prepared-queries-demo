@@ -1,0 +1,95 @@
+# consul-k8s Helm values for DC5 — admin partition dc5-k8s of datacenter dc3-vm.
+# Deploys: Consul client daemonset, connect inject webhook, mesh gateway, terminating gateway.
+# No Consul server pods — connects to DC3 Consul server via externalServers.
+#
+# Install:
+#   helm repo add hashicorp https://helm.releases.hashicorp.com
+#   helm install consul hashicorp/consul \
+#     --namespace consul --create-namespace \
+#     --version 1.6.x \
+#     -f k8s/dc5/consul-values.yaml \
+#     --kube-context dc5
+#
+# Replace DC3_SERVER_PUBLIC_IP before installing. The consul-k8s chart uses this to
+# bootstrap the Consul client daemonset and to create partition-scoped tokens.
+# For production, use a private IP if DC5 EKS nodes are in DC3's VPC.
+
+global:
+  name: consul
+  datacenter: dc3-vm
+
+  adminPartitions:
+    enabled: true
+    name: dc5-k8s
+
+  image: "hashicorp/consul-enterprise:1.21.6-ent"
+  imageEnvoy: "envoyproxy/envoy:v1.31.0"
+
+  enableConsulNamespaces: true
+
+  # ACLs disabled for this demo. Enable in production.
+  acls:
+    manageSystemACLs: false
+
+  # TLS disabled for this demo. Enable in production.
+  tls:
+    enabled: false
+
+  # Enterprise license. Mount from a secret created before helm install:
+  #   kubectl create secret generic consul-ent-license \
+  #     --from-file=key=vm/license.hclic -n consul
+  enterpriseLicense:
+    secretName: consul-ent-license
+    secretKey: key
+
+server:
+  enabled: false  # external servers — DC3 VMs
+
+externalServers:
+  enabled: true
+  # DC3 Consul server public IP (or private IP if in same VPC).
+  hosts:
+    - "REPLACE_WITH_DC3_SERVER_IP"
+  httpPort: 8500
+  grpcPort: 8502
+  # Don't watch for server changes — single server node in demo.
+  skipServerWatch: true
+
+client:
+  enabled: true
+  grpc: true
+  # Expose gossip ports so DC3 SG can accept from EKS node IPs.
+  exposeGossipPorts: true
+
+# Sidecar injection — opt-in per namespace with annotation:
+#   consul.hashicorp.com/connect-inject: "true"
+connectInject:
+  enabled: true
+  default: false  # explicit opt-in per pod
+  consulNamespaceMirroringEnabled: false
+
+# Mesh gateway: routes cross-partition and cross-peer traffic.
+# Exposed as LoadBalancer (AWS NLB) so DC3 and DC4 can reach it.
+meshGateway:
+  enabled: true
+  replicas: 1
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+
+# Terminating gateway: allows mesh services in DC5 to call external
+# (non-mesh) services, e.g. DC3's postgres VM.
+terminatingGateways:
+  enabled: true
+  gateways:
+    - name: terminating-gateway
+      replicas: 1
+
+controller:
+  enabled: true
+
+ui:
+  enabled: true
+  service:
+    type: LoadBalancer

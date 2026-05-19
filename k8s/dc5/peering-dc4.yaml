@@ -1,0 +1,36 @@
+# Cluster peering: DC5 (partition dc5-k8s of dc3-vm) ↔ DC4 (default partition of dc4-esm).
+# This is a partition-level peer — Consul 1.14+ supports peering between admin partitions.
+# The peer enables Scenario D: product-api in DC5 K8s fails over to DC4 VMs.
+#
+# Step 1 — Generate a peering token on DC4 (the "dialer" initiates, "acceptor" generates the token):
+#
+#   DC4 generates token (acceptor side):
+#   curl -X POST http://$DC4_SERVER_PUB:8500/v1/peering/token \
+#     -d '{"PeerName":"dc5-k8s-peer","Partition":"default"}' \
+#     | jq -r '.PeeringToken' > /tmp/dc5-peering-token.txt
+#
+# Step 2 — Apply the PeeringAcceptor CRD in the DC5 K8s cluster:
+#   (consul-k8s handles the REST API call using the token from step 1)
+#
+#   kubectl apply -f k8s/dc5/peering-dc4.yaml --context dc5
+#
+# Step 3 — Initiate peering from DC5 (dialer side) using the PeeringDialer CRD:
+#   The PeeringDialer below reads the token from a K8s secret.
+#   Create the secret first:
+#   kubectl create secret generic dc4-peering-token \
+#     --from-file=data=/tmp/dc5-peering-token.txt \
+#     -n consul --context dc5
+
+---
+# PeeringDialer: DC5's partition dials DC4 using the token DC4 generated.
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: PeeringDialer
+metadata:
+  name: dc4-peer
+  namespace: consul
+spec:
+  peer:
+    secret:
+      name: dc4-peering-token
+      key: data
+      backend: kubernetes

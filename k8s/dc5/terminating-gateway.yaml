@@ -1,0 +1,38 @@
+# Terminating gateway config for DC5.
+# Allows mesh services in dc5-k8s to reach DC3's postgres VM (non-mesh external service).
+# The Consul client registers postgres as an external service in DC3's default partition,
+# then the terminating gateway proxies TCP traffic from the mesh to it.
+#
+# Prerequisites:
+#   1. consul-k8s chart installed with terminatingGateways.enabled = true
+#   2. DC3's postgres VM is registered in Consul (done by bootstrap-dc3-hashicups.sh)
+#
+# Apply:
+#   kubectl apply -f k8s/dc5/terminating-gateway.yaml --context dc5
+
+---
+# TerminatingGateway CRD — lists external services routed through the gateway.
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: TerminatingGateway
+metadata:
+  name: terminating-gateway
+  namespace: consul
+spec:
+  services:
+    # postgres runs on a DC3 VM, registered as "postgres" in the default partition.
+    # DC5 mesh services address it as "postgres.service.consul" and the terminating
+    # gateway forwards the connection to the actual VM.
+    - name: postgres
+      namespace: default
+
+---
+# ExportedServices — make DC3's default-partition postgres visible to dc5-k8s partition.
+# This resource is applied in DC3's default partition context (via the Consul server API
+# or a consul-k8s CRD in a cluster joined to the default partition).
+# Included here for reference; apply via the DC3 Consul API:
+#
+#   curl -X PUT http://$DC3_SERVER_PUB:8500/v1/config \
+#     -d @vm/consul/exported-services-dc3-to-dc5.json
+#
+# See vm/consul/exported-services-dc3.json for the existing DC3→DC4 config.
+# Add the dc5-k8s partition to the consumers list.

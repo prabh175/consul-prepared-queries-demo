@@ -1,0 +1,27 @@
+# Consul terminating gateway for DC4.
+# Bridges Connect-aware traffic from the mesh to ESM-registered external services.
+# Run after: consul config write vm/terminating-gw/terminating-gateway.json
+
+[Unit]
+Description=Consul Connect Terminating Gateway (dc4-esm)
+After=consul.service
+Wants=consul.service
+
+[Service]
+Type=simple
+User=consul
+Group=consul
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EnvironmentFile=-/etc/consul.d/consul.env
+ExecStart=/usr/bin/consul connect envoy \
+  -gateway=terminating \
+  -register \
+  -service=terminating-gateway \
+  -ignore-envoy-compatibility \
+  -- \
+  -l warning
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

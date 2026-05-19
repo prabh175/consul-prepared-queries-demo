@@ -1,0 +1,14 @@
+{
+  "Kind": "exported-services",
+  "Name": "default",
+  "Services": [
+    {
+      "Name": "product-api",
+      "Consumers": [{ "Peer": "dc4-esm" }]
+    },
+    {
+      "Name": "postgres",
+      "Consumers": [{ "Partition": "dc5-k8s" }]
+    }
+  ]
+}

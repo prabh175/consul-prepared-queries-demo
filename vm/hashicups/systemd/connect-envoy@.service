@@ -1,0 +1,27 @@
+# Consul Connect Envoy sidecar for a service registered on this agent.
+# Instance name must match the parent service name (e.g. connect-envoy@postgres).
+# Install: bootstrap-dc3-hashicups.sh copies this to /etc/systemd/system/
+#
+# If ACLs enabled: set CONSUL_HTTP_TOKEN in /etc/consul.d/consul.env
+
+[Unit]
+Description=Consul Connect Envoy sidecar for %i
+After=consul.service docker.service
+Requires=consul.service
+
+[Service]
+Type=simple
+User=consul
+Group=consul
+EnvironmentFile=-/etc/consul.d/consul.env
+ExecStart=/usr/bin/consul connect envoy \
+  -sidecar-for %i \
+  -- \
+  -l warning
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

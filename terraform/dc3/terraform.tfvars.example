@@ -1,0 +1,34 @@
+# Copy to terraform.tfvars (gitignored).
+
+aws_region   = "us-east-1"
+project_name = "consul-pq-demo"
+vpc_cidr     = "10.10.0.0/16"   # default — change only if this CIDR conflicts in your account
+
+ssh_key_name         = "your-keypair"
+operator_public_cidr = "1.2.3.4/32"  # your laptop: curl -s ifconfig.me
+bastion_public_cidr  = ""            # fill in after bastion EIP is known (Step 4 in DEMO-GUIDE)
+enable_bastion       = false         # set true to provision the demo bastion VM
+
+# VPC peering — fill in after: terraform -chdir=terraform/dc4 output -raw vpc_id
+peer_vpc_id   = "vpc-0b3d95074e006ba19"                   # dc4 vpc_id output
+peer_vpc_cidr = "10.20.0.0/16"      # must match dc4 vpc_cidr
+
+consul_server_instance_type = "t3.small"
+hashicups_instance_type     = "t3.micro"
+
+# product-api gets 3 instances for the prepared query failover demo.
+# All other services: 1 instance each.
+hashicups_service_counts = {
+  postgres    = 1
+  product-api = 3
+  payments    = 1
+  public-api  = 1
+  frontend    = 1
+}
+
+route53_public_zone_name = "prabhjit-singh.sbx.hashidemos.io"   # records created as *.dc3.<zone>
+enable_consul_dns_bridge = true
+
+# Set true to allocate an Elastic IP for the Consul server — required for
+# a stable DC3_CONSUL_EIP value in dnsmasq-dual-dc.conf.
+enable_elastic_ip = true

@@ -1,0 +1,10 @@
+{
+  "Kind": "exported-services",
+  "Name": "default",
+  "Services": [
+    {
+      "Name": "product-api",
+      "Consumers": [{ "Peer": "dc3-vm" }]
+    }
+  ]
+}

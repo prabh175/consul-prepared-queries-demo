@@ -1,0 +1,243 @@
+# HashiCups full stack for DC6 (K8s catalog-sync partition dc6-k8s of dc4-esm).
+# All services including postgres run here — self-contained for Scenario C failover.
+# No sidecar proxies; services communicate directly via K8s ClusterIP.
+# product-api is annotated for catalog sync → registered in DC4 Consul as an external node.
+# The sameness group (DC4 default + DC6 dc6-k8s) makes product-api here a failover target.
+#
+# Apply:
+#   kubectl apply -f k8s/dc6/workloads.yaml --context dc6
+#
+# After applying, verify catalog sync:
+#   consul catalog services -http-addr=http://$DC4_SERVER_PUB:8500
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hashicups
+  annotations:
+    # consul.hashicorp.com/service-sync: "true" enables catalog sync for all services in
+    # this namespace. Set to "false" on individual services to opt out.
+    consul.hashicorp.com/service-sync: "false"
+
+---
+# ── postgres ──────────────────────────────────────────────────────────────────
+# Not catalog-synced — internal to DC6, accessed by product-api directly.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: hashicups
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: hashicorpdemoapp/product-api-db:v0.0.22
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: products
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: password
+
+---
+# ── product-api ───────────────────────────────────────────────────────────────
+# Catalog-synced into DC4 Consul. Becomes a failover target in the sameness group.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-api
+  namespace: hashicups
+  annotations:
+    # Catalog sync: register this K8s service in DC4's Consul as "product-api".
+    consul.hashicorp.com/service-sync: "true"
+    consul.hashicorp.com/service-name: "product-api"
+    consul.hashicorp.com/service-port: "9090"
+spec:
+  selector:
+    app: product-api
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-api
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: product-api
+  template:
+    metadata:
+      labels:
+        app: product-api
+    spec:
+      containers:
+        - name: product-api
+          image: hashicorpdemoapp/product-api:v0.0.22
+          ports:
+            - containerPort: 9090
+          env:
+            - name: NAME
+              value: "product-api-dc6"
+            - name: DB_CONNECTION_STRING
+              value: "host=postgres port=5432 user=postgres password=password dbname=products sslmode=disable"
+
+---
+# ── payments ──────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments
+  namespace: hashicups
+  annotations:
+    consul.hashicorp.com/service-sync: "true"
+    consul.hashicorp.com/service-name: "payments"
+    consul.hashicorp.com/service-port: "8080"
+spec:
+  selector:
+    app: payments
+  ports:
+    - port: 8080
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments
+  template:
+    metadata:
+      labels:
+        app: payments
+    spec:
+      containers:
+        - name: payments
+          image: hashicorpdemoapp/payments:v0.0.16
+          ports:
+            - containerPort: 8080
+
+---
+# ── public-api ────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: public-api
+  namespace: hashicups
+  annotations:
+    consul.hashicorp.com/service-sync: "true"
+    consul.hashicorp.com/service-name: "public-api"
+    consul.hashicorp.com/service-port: "8080"
+spec:
+  selector:
+    app: public-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: public-api
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: public-api
+  template:
+    metadata:
+      labels:
+        app: public-api
+    spec:
+      containers:
+        - name: public-api
+          image: hashicorpdemoapp/public-api:v0.0.7
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PRODUCT_API_URI
+              value: "http://product-api:9090"
+            - name: PAYMENT_API_URI
+              value: "http://payments:8080"
+
+---
+# ── frontend ──────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: hashicups
+spec:
+  type: LoadBalancer
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 3000
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: hashicorpdemoapp/frontend:v1.0.9
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_PUBLIC_API_URL
+              value: "http://public-api:8080"

@@ -1,0 +1,45 @@
+# Sameness group for Scenario C failover: DC4 default partition ↔ DC6 dc6-k8s partition.
+# Declares the two partitions as equivalent so Consul automatically fails over
+# product-api service instances from DC4 VMs → DC6 K8s when DC4's instances go unhealthy.
+#
+# Sameness groups work within a single datacenter across partitions.
+# DC4 (dc4-esm) is the datacenter; dc6-k8s is an admin partition of it.
+#
+# Apply this CRD in the DC6 K8s cluster. consul-k8s will write the config to DC4's server.
+#   kubectl apply -f k8s/dc6/sameness-group.yaml --context dc6
+#
+# Then apply the same config via the DC4 Consul API to the default partition:
+#   curl -X PUT http://$DC4_SERVER_PUB:8500/v1/config \
+#     -H "X-Consul-Partition: default" \
+#     -d @- <<'EOF'
+#   {
+#     "Kind": "sameness-group",
+#     "Name": "dc4-dc6-product-api",
+#     "Partition": "default",
+#     "DefaultForFailover": true,
+#     "IncludeLocal": true,
+#     "Members": [
+#       {"Partition": "default"},
+#       {"Partition": "dc6-k8s"}
+#     ]
+#   }
+#   EOF
+
+---
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: SamenessGroup
+metadata:
+  name: dc4-dc6-product-api
+  namespace: consul
+spec:
+  # defaultForFailover: when a service has no explicit failover policy,
+  # this sameness group is used automatically.
+  defaultForFailover: true
+  # includeLocal: the dc6-k8s partition (where this CRD is applied) is always
+  # included as a member alongside the explicit members list.
+  includeLocal: true
+  members:
+    # DC4's default partition — where the VM-based product-api instances live.
+    - partition: default
+    # DC6's dc6-k8s partition — where the K8s product-api replica lives.
+    - partition: dc6-k8s

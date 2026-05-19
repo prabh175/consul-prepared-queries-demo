@@ -1,0 +1,39 @@
+# ExportedServices for DC5 partition (dc5-k8s).
+# Exports DC5's product-api to the dc4-peer so the Scenario D prepared query
+# can use DC4 as a failover target for DC5's product-api.
+#
+# Apply via the Consul API against DC3's server (the partition's control plane):
+#
+#   curl -X PUT http://$DC3_SERVER_PUB:8500/v1/config \
+#     -H "X-Consul-Namespace: default" \
+#     -H "X-Consul-Partition: dc5-k8s" \
+#     -d @k8s/dc5/exported-services.yaml
+#
+# Or apply as a CRD in the dc5-k8s K8s cluster:
+#   kubectl apply -f k8s/dc5/exported-services.yaml --context dc5
+
+---
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ExportedServices
+metadata:
+  name: dc5-k8s
+  namespace: consul
+spec:
+  services:
+    # Export product-api from dc5-k8s → peer dc4-peer so the prepared query
+    # (Scenario D) can use DC4 as a failover when DC5's product-api is unhealthy.
+    - name: product-api
+      namespace: hashicups
+      consumers:
+        - peer: dc4-peer
+
+    # Export public-api and frontend for observability / future use.
+    - name: public-api
+      namespace: hashicups
+      consumers:
+        - peer: dc4-peer
+
+    - name: frontend
+      namespace: hashicups
+      consumers:
+        - peer: dc4-peer

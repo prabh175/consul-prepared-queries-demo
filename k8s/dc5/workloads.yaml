@@ -1,0 +1,202 @@
+# HashiCups app layer for DC5 (K8s mesh partition dc5-k8s of dc3-vm).
+# Services deployed here:  product-api, payments, public-api, frontend.
+# Postgres runs on a DC3 VM and is reached via the terminating gateway.
+#
+# Apply:
+#   kubectl apply -f k8s/dc5/workloads.yaml --context dc5
+#
+# After applying, also apply:
+#   k8s/dc5/terminating-gateway.yaml  — allows product-api to reach DC3's postgres
+#   k8s/dc5/service-intentions.yaml   — allow service-to-service calls
+#   k8s/dc5/exported-services.yaml    — export DC5 services to DC3 default partition
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hashicups
+
+---
+# ── product-api ───────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-api
+  namespace: hashicups
+spec:
+  selector:
+    app: product-api
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-api
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: product-api
+  template:
+    metadata:
+      labels:
+        app: product-api
+      annotations:
+        # Connect inject: Consul will inject an Envoy sidecar.
+        consul.hashicorp.com/connect-inject: "true"
+        consul.hashicorp.com/connect-service: "product-api"
+    spec:
+      containers:
+        - name: product-api
+          image: hashicorpdemoapp/product-api:v0.0.22
+          ports:
+            - containerPort: 9090
+          env:
+            - name: NAME
+              value: "product-api-dc5"
+            # DB_CONNECTION_STRING points to postgres via the terminating gateway.
+            # Consul resolves "postgres.service.consul" to the terminating gateway's
+            # Envoy listener, which forwards to DC3's postgres VM.
+            - name: DB_CONNECTION_STRING
+              value: "host=postgres.service.consul port=5432 user=postgres password=password dbname=products sslmode=disable"
+
+---
+# ── payments ──────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments
+  namespace: hashicups
+spec:
+  selector:
+    app: payments
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments
+  template:
+    metadata:
+      labels:
+        app: payments
+      annotations:
+        consul.hashicorp.com/connect-inject: "true"
+        consul.hashicorp.com/connect-service: "payments"
+    spec:
+      containers:
+        - name: payments
+          image: hashicorpdemoapp/payments:v0.0.16
+          ports:
+            - containerPort: 8080
+
+---
+# ── public-api ────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: public-api
+  namespace: hashicups
+spec:
+  selector:
+    app: public-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: public-api
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: public-api
+  template:
+    metadata:
+      labels:
+        app: public-api
+      annotations:
+        consul.hashicorp.com/connect-inject: "true"
+        consul.hashicorp.com/connect-service: "public-api"
+        # Upstream declarations for Envoy sidecar.
+        consul.hashicorp.com/connect-service-upstreams: "product-api:9090,payments:8080"
+    spec:
+      containers:
+        - name: public-api
+          image: hashicorpdemoapp/public-api:v0.0.7
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PRODUCT_API_URI
+              value: "http://localhost:9090"
+            - name: PAYMENT_API_URI
+              value: "http://localhost:8080"
+
+---
+# ── frontend ──────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: hashicups
+spec:
+  type: LoadBalancer
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: hashicups
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+      annotations:
+        consul.hashicorp.com/connect-inject: "true"
+        consul.hashicorp.com/connect-service: "frontend"
+        consul.hashicorp.com/connect-service-upstreams: "public-api:8080"
+    spec:
+      containers:
+        - name: frontend
+          image: hashicorpdemoapp/frontend:v1.0.9
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_PUBLIC_API_URL
+              value: "http://localhost:8080"

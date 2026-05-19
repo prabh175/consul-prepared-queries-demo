@@ -1,0 +1,74 @@
+# Service intentions for DC5 — controls which services can call which.
+# All intentions are deny-by-default when connect inject is enabled.
+#
+# Apply:
+#   kubectl apply -f k8s/dc5/service-intentions.yaml --context dc5
+
+---
+# frontend → public-api
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceIntentions
+metadata:
+  name: public-api
+  namespace: hashicups
+spec:
+  destination:
+    name: public-api
+    namespace: hashicups
+  sources:
+    - name: frontend
+      namespace: hashicups
+      action: allow
+
+---
+# public-api → product-api
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceIntentions
+metadata:
+  name: product-api
+  namespace: hashicups
+spec:
+  destination:
+    name: product-api
+    namespace: hashicups
+  sources:
+    - name: public-api
+      namespace: hashicups
+      action: allow
+
+---
+# public-api → payments
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceIntentions
+metadata:
+  name: payments
+  namespace: hashicups
+spec:
+  destination:
+    name: payments
+    namespace: hashicups
+  sources:
+    - name: public-api
+      namespace: hashicups
+      action: allow
+
+---
+# product-api → postgres (via terminating gateway)
+# The terminating gateway proxies the postgres connection; the intention is between
+# product-api and the postgres service registered in the default namespace.
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceIntentions
+metadata:
+  name: postgres
+  namespace: consul
+spec:
+  destination:
+    name: postgres
+    namespace: default
+  sources:
+    - name: product-api
+      namespace: hashicups
+      action: allow
+    - name: terminating-gateway
+      namespace: consul
+      action: allow

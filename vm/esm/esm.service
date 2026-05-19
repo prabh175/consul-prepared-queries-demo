@@ -1,0 +1,13 @@
+[Unit]
+Description=Consul ESM (External Service Monitor) for dc4-esm
+After=consul.service
+Requires=consul.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/consul-esm -config-file=/etc/consul-esm/esm.hcl
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

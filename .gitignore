@@ -19,6 +19,11 @@ terraform.tfvars
 
 # Consul / ESM binaries
 *.zip
+*.tgz
+
+# Uptycs agent values — contain enroll secrets and CA certs
+k8sosquery-values.yaml
+kubequery-values.yaml
 
 # macOS
 .DS_Store

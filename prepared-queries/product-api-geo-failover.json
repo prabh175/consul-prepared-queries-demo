@@ -7,7 +7,7 @@
     "Failover": {
       "Targets": [
         { "Datacenter": "dc3-vm" },
-        { "Peer": "dc4-esm" }
+        { "Peer": "dc4-esm", "Namespace": "hashicups" }
       ]
     }
   }

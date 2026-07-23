@@ -1,13 +1,12 @@
 {
-  "Name": "product-api-hybrid",
+  "Name": "frontend-geo",
   "Service": {
-    "Service": "product-api",
-    "Partition": "dc5-k8s",
+    "Service": "frontend",
     "Namespace": "hashicups",
     "OnlyPassing": true,
     "Failover": {
       "Targets": [
-        { "Peer": "dc4-peer" }
+        { "Peer": "dc5-peer" }
       ]
     }
   }

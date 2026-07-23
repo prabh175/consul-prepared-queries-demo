@@ -67,10 +67,11 @@ resource "aws_eks_cluster" "dc5" {
   version  = var.eks_version
 
   vpc_config {
-    subnet_ids             = var.dc3_subnet_ids
-    endpoint_public_access = true
-    # Restrict API server to operator + VPC; EKS nodes reach it via private endpoint.
-    public_access_cidrs    = var.operator_public_cidr != "" ? [var.operator_public_cidr] : ["0.0.0.0/0"]
+    subnet_ids              = var.dc3_subnet_ids
+    endpoint_public_access  = true
+    endpoint_private_access = true
+    # Restrict public endpoint to operator laptop; nodes use private endpoint within VPC.
+    public_access_cidrs     = var.operator_public_cidr != "" ? [var.operator_public_cidr] : ["0.0.0.0/0"]
   }
 
   depends_on = [aws_iam_role_policy_attachment.eks_cluster]
@@ -118,6 +119,21 @@ resource "aws_security_group_rule" "eks_mesh_gw" {
   cidr_blocks       = [var.dc3_vpc_cidr]
 }
 
+# EKS API server (443) from DC3 VPC. The DC3 Consul server calls the Kubernetes
+# TokenReview API to validate service-account JWTs for the consul-k8s auth methods
+# (ACL login). DC3 resolves the cluster endpoint to the private ENIs, so it needs
+# 443 ingress on the cluster security group. Without this, ACL login hangs and the
+# connect-injector/clients never become ready.
+resource "aws_security_group_rule" "eks_api_from_dc3" {
+  type              = "ingress"
+  description       = "EKS API 443 from DC3 VPC (Consul server tokenreview)"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  security_group_id = aws_eks_cluster.dc5.vpc_config[0].cluster_security_group_id
+  cidr_blocks       = [var.dc3_vpc_cidr]
+}
+
 # ── EKS managed node group ────────────────────────────────────────────────────
 
 resource "aws_eks_node_group" "dc5" {
@@ -129,9 +145,9 @@ resource "aws_eks_node_group" "dc5" {
   instance_types = [var.node_instance_type]
 
   scaling_config {
-    desired_size = 1
+    desired_size = 2
     min_size     = 1
-    max_size     = 1
+    max_size     = 2
   }
 
   # SSH access for debugging. Remove in production.

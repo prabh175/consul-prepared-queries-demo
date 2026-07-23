@@ -2,12 +2,13 @@
   "Name": "product-api-geo",
   "Service": {
     "Service": "product-api",
+    "Namespace": "hashicups",
     "Near": "_agent",
     "OnlyPassing": true,
     "Failover": {
       "Targets": [
-        { "Datacenter": "dc4-esm" },
-        { "Peer": "dc3-vm" }
+        { "Datacenter": "dc4-esm", "Namespace": "hashicups" },
+        { "Peer": "dc3-vm", "Namespace": "default" }
       ]
     }
   }

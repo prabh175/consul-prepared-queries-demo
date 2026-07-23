@@ -6,13 +6,12 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 docker rm -f public-api 2>/dev/null || true
+# --network host (canonical pattern): reach Connect upstreams on localhost.
 docker run -d --name public-api --restart unless-stopped \
-  "${DNS_FLAGS[@]}" \
-  "${DOCKER_HOST_GATEWAY_FLAGS[@]}" \
-  -p 8080:8080 \
+  --network host \
   -e BIND_ADDRESS=0.0.0.0:8080 \
-  -e PRODUCT_API_URI="http://host.docker.internal:19090" \
-  -e PAYMENT_API_URI="http://host.docker.internal:19091" \
+  -e PRODUCT_API_URI="http://localhost:19090" \
+  -e PAYMENT_API_URI="http://localhost:19091" \
   hashicorpdemoapp/public-api:v0.0.7
 
 sleep 3

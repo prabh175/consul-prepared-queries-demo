@@ -1,17 +1,17 @@
 # consul-k8s Helm values for DC5 — admin partition dc5-k8s of datacenter dc3-vm.
-# Deploys: Consul client daemonset, connect inject webhook, mesh gateway, terminating gateway.
+# Deploys: consul-dataplane sidecars, connect inject webhook, mesh gateway, terminating gateway.
 # No Consul server pods — connects to DC3 Consul server via externalServers.
 #
 # Install:
 #   helm repo add hashicorp https://helm.releases.hashicorp.com
 #   helm install consul hashicorp/consul \
 #     --namespace consul --create-namespace \
-#     --version 1.6.x \
+#     --version 1.9.6 \
 #     -f k8s/dc5/consul-values.yaml \
 #     --kube-context dc5
 #
 # Replace DC3_SERVER_PUBLIC_IP before installing. The consul-k8s chart uses this to
-# bootstrap the Consul client daemonset and to create partition-scoped tokens.
+# bootstrap the partition-init job and to create partition-scoped tokens.
 # For production, use a private IP if DC5 EKS nodes are in DC3's VPC.
 
 global:
@@ -22,14 +22,25 @@ global:
     enabled: true
     name: dc5-k8s
 
-  image: "hashicorp/consul-enterprise:1.21.6-ent"
-  imageEnvoy: "envoyproxy/envoy:v1.31.0"
+  image: "hashicorp/consul-enterprise:1.21.6-ent-ubi"
+  # Keep imageK8S and imageConsulDataplane aligned with the Helm chart version
+  # to avoid flag skew (dataplane CrashLoopBackOff on unknown args).
+  # consul-dataplane handles DNS resolution — DNS queries go to kube-dns normally,
+  # not through a Consul DNS proxy at 127.0.0.1:53.
+  imageK8S: "hashicorp/consul-k8s-control-plane:1.9.6-ubi"
+  imageConsulDataplane: "hashicorp/consul-dataplane:1.9.6-ubi"
 
   enableConsulNamespaces: true
 
-  # ACLs disabled for this demo. Enable in production.
+  # ACLs enabled on DC3 (bootstrapped). consul-k8s authenticates to the external
+  # DC3 server with this bootstrap token to create the partition, auth-method, and
+  # partition-scoped tokens. Secret created before install:
+  #   kubectl create secret generic consul-bootstrap-acl-token --from-file=token=<file> -n consul
   acls:
-    manageSystemACLs: false
+    manageSystemACLs: true
+    bootstrapToken:
+      secretName: consul-bootstrap-acl-token
+      secretKey: token
 
   # TLS disabled for this demo. Enable in production.
   tls:
@@ -49,24 +60,49 @@ externalServers:
   enabled: true
   # DC3 Consul server public IP (or private IP if in same VPC).
   hosts:
-    - "REPLACE_WITH_DC3_SERVER_IP"
+    - "10.10.9.52"
   httpPort: 8500
+  httpsPort: 8500  # no TLS — point partition-init at the HTTP port
   grpcPort: 8502
   # Don't watch for server changes — single server node in demo.
   skipServerWatch: true
+  k8sAuthMethodHost: "https://D66A3CED775F089215B217BD5F9EC3DC.gr7.us-east-1.eks.amazonaws.com"
 
 client:
   enabled: true
   grpc: true
   # Expose gossip ports so DC3 SG can accept from EKS node IPs.
   exposeGossipPorts: true
+  # consul-k8s 1.6.x does not inject retry_join from externalServers when
+  # adminPartitions.name is non-default. Provide it explicitly.
+  extraConfig: |
+    {"retry_join": ["10.10.9.52"]}
 
 # Sidecar injection — opt-in per namespace with annotation:
 #   consul.hashicorp.com/connect-inject: "true"
+dns:
+  enabled: true
+  enableRedirection: false
+
 connectInject:
   enabled: true
   default: false  # explicit opt-in per pod
-  consulNamespaceMirroringEnabled: false
+  consulNamespaces:
+    mirroringK8S: true
+  transparentProxy:
+    defaultEnabled: true
+    defaultOverwriteProbes: true
+  metrics:
+    defaultEnabled: true
+    defaultEnableMerging: true
+    defaultMergedMetricsPort: "20100"
+    defaultPrometheusScrapePort: "20200"
+    defaultPrometheusScrapePath: "/metrics"
+  # API Gateway — moved under connectInject as of Consul 1.19 (top-level apiGateway stanza removed).
+  apiGateway:
+    manageExternalCRDs: true
+    managedGatewayClass:
+      serviceType: LoadBalancer
 
 # Mesh gateway: routes cross-partition and cross-peer traffic.
 # Exposed as LoadBalancer (AWS NLB) so DC3 and DC4 can reach it.
@@ -75,7 +111,7 @@ meshGateway:
   replicas: 1
   service:
     type: LoadBalancer
-    annotations:
+    annotations: |
       service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
 
 # Terminating gateway: allows mesh services in DC5 to call external

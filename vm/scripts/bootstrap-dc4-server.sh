@@ -2,12 +2,18 @@
 # Bootstrap the DC4 Consul server VM (also runs mesh-gw and consul-esm).
 # Usage: sudo bash bootstrap-dc4-server.sh <DC3_PEER_TOKEN>
 #
+# Optional env var CONSUL_MGMT_TOKEN: if set, the script provisions a dedicated
+# consul-esm ACL policy + token and injects it into esm.hcl. Provide this whenever the
+# anonymous token is restricted (default_policy=deny, or an explicit service:write deny
+# on anonymous) so ESM does not depend on anonymous permissions. The token is written
+# only to /etc/consul-esm/esm.hcl on the server and is never committed.
+#
 # Before running, SCP from repo root:
 #   scp -i $KEY_W2 -r vm/ ubuntu@$DC4_SERVER_PUB:/tmp/
 #   scp -i $KEY_W2 vm/consul_*.zip ubuntu@$DC4_SERVER_PUB:/tmp/
 #   scp -i $KEY_W2 vm/license.hclic ubuntu@$DC4_SERVER_PUB:/tmp/consul.hclic
 #   # consul-esm is downloaded automatically if not present at /tmp/consul-esm_*.zip
-#   ssh -i $KEY_W2 ubuntu@$DC4_SERVER_PUB "sudo bash /tmp/vm/scripts/bootstrap-dc4-server.sh '<PEER_TOKEN>'"
+#   ssh -i $KEY_W2 ubuntu@$DC4_SERVER_PUB "sudo CONSUL_MGMT_TOKEN='<MGMT_TOKEN>' bash /tmp/vm/scripts/bootstrap-dc4-server.sh '<PEER_TOKEN>'"
 #
 # Get <PEER_TOKEN> from DC3 server: consul peering generate-token -name dc4-esm
 set -euo pipefail
@@ -104,6 +110,35 @@ consul-esm -version || { echo "ERROR: consul-esm binary not functional after ins
 # --- ESM config ---
 mkdir -p /etc/consul-esm
 cp "${VM_DIR}/esm/esm.hcl" /etc/consul-esm/esm.hcl
+
+# --- ESM ACL token (only when a management token is supplied) ---
+# ESM registers a "consul-esm" service and writes external node/service health. Under a
+# restricted anonymous token it gets 403 on service:write and crash-loops, freezing every
+# external check. Provision a dedicated token so ESM never relies on anonymous perms.
+if [[ -n "${CONSUL_MGMT_TOKEN:-}" ]]; then
+  echo "==> Provisioning consul-esm ACL policy + token..."
+  export CONSUL_HTTP_TOKEN="${CONSUL_MGMT_TOKEN}"
+  cat > /tmp/esm-policy.hcl <<'POLICY'
+node_prefix "" { policy = "write" }
+service_prefix "" { policy = "write" }
+agent_prefix "" { policy = "read" }
+session_prefix "" { policy = "write" }
+key_prefix "consul-esm/" { policy = "write" }
+POLICY
+  consul acl policy create -name consul-esm -rules @/tmp/esm-policy.hcl >/dev/null 2>&1 || \
+    echo "    (consul-esm policy already exists — reusing)"
+  ESM_TOKEN=$(consul acl token create -description "consul-esm dc4" \
+    -policy-name consul-esm -format=json | python3 -c "import json,sys;print(json.load(sys.stdin)['SecretID'])")
+  rm -f /tmp/esm-policy.hcl
+  unset CONSUL_HTTP_TOKEN
+  if [[ -n "${ESM_TOKEN}" ]]; then
+    sed -i '/^token *= *"/d' /etc/consul-esm/esm.hcl
+    echo "token = \"${ESM_TOKEN}\"" >> /etc/consul-esm/esm.hcl
+    echo "==> consul-esm token written to /etc/consul-esm/esm.hcl"
+  else
+    echo "WARNING: failed to mint consul-esm token — ESM will run with anonymous perms"
+  fi
+fi
 
 # --- ESM service ---
 cp "${VM_DIR}/esm/esm.service" /etc/systemd/system/consul-esm.service

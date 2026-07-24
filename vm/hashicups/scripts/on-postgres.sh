@@ -5,9 +5,11 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 docker rm -f postgres 2>/dev/null || true
+# --network host (canonical learn-consul-get-started-vms pattern): the app shares the
+# host netns so its Connect sidecar upstreams are reachable on localhost. No -p / no
+# host.docker.internal / no local_bind gymnastics.
 docker run -d --name postgres --restart unless-stopped \
-  "${DNS_FLAGS[@]}" \
-  -p 5432:5432 \
+  --network host \
   -e POSTGRES_DB=products \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=password \

@@ -16,17 +16,45 @@ proximity. When all instances in the primary site fail, it automatically returns
 from the peer datacenter. No application change, no DNS record update, no manual
 intervention.
 
-We will cover four scenarios across two regions and three deployment models:
+We will cover five scenarios across two regions and four deployment models:
 
 | Scenario | What fails | Infrastructure | Mechanism |
 |----------|-----------|----------------|-----------|
 | **A — Service failure** | product-api containers on DC3 | DC3 + DC4 VMs | Prepared query, health-check driven |
 | **B — Control plane failure** | DC3 Consul server | DC3 + DC4 VMs | Dual DNS NLB nameservers |
 | **C — VM ↔ K8s failover** | DC4 VM product-api | DC4 VMs + DC6 K8s | Sameness group, cross-partition |
-| **D — K8s mesh failover** | DC5 K8s app services | DC5 K8s + DC4 VMs | Prepared query, cross-peer from dc5-k8s partition |
+| **D — K8s mesh failover** | DC5 K8s product-api | DC5 K8s + DC4 VMs | Prepared query, cross-peer from dc5-k8s partition |
+| **E — Cross-cluster frontend** | DC5 K8s frontend NLB | DC5 K8s + DC6 K8s | Prepared query + ESM, mesh → non-mesh |
 
 Scenarios A and B use the existing VM infrastructure and can be run immediately after
-README Phases 1–8. Scenarios C and D require the K8s clusters (README Phases 10–13).
+README Phases 1–8. Scenarios C, D, and E require the K8s clusters (README Phases 10–14).
+
+---
+
+## How Consul Compares to F5 GTM and LTM
+
+Today's global traffic story is built on two appliance tiers: **BIG-IP DNS (GTM)** for
+cross-site and cross-region failover, and **BIG-IP LTM** for load balancing within a site.
+Consul delivers both capabilities from one control plane, driven by real service health and
+workload identity rather than network position — and it does so for VMs and Kubernetes with
+the same constructs, with no appliance pair to license, size, or fail over itself.
+
+| Traditional F5 | What it does | Consul equivalent | Why Consul is different |
+|----------------|-------------|-------------------|-------------------------|
+| **GTM / BIG-IP DNS (GSLB)** | DNS-based failover across data centers via wide-IPs, pools, topology records | **Prepared queries + Consul DNS** | The failover decision uses *application* health evaluated at query time — not a shallow TCP/ICMP monitor — and there is no wide-IP or DNS record to edit when topology changes |
+| **GTM health monitors** | Periodic TCP/HTTP probe launched from the appliance | **Agent / ESM / sidecar checks** | Health is reported by the workload's own Consul agent or Envoy sidecar (script, gRPC, TTL, readiness) and shared fleet-wide, not polled from one central box |
+| **LTM virtual servers + pools** | L4/L7 load balancing to backend pool members inside a site | **Service mesh (Connect) + discovery** | Balancing happens in a distributed Envoy sidecar next to each workload — no VIP to provision, no appliance to size — and mTLS is on by default |
+| **LTM iRules / SNAT / SSL offload** | Per-connection policy enforced on the appliance | **Service intentions + automatic mTLS** | Policy is identity-based (SPIFFE), declared once and enforced everywhere; certificates are issued and rotated by Consul automatically |
+| **New GSLB pool for a new DC** | Add pool, members, monitors, and a wide-IP entry by hand | **Sameness group** | Declare two partitions equivalent once; every current and future service is covered with zero per-service config |
+| **Separate config per environment** | Different modules/appliances for physical vs cloud vs K8s | **One catalog + partitions + peering + catalog sync** | VM, EKS-mesh, and EKS-non-mesh services are all first-class catalog entries and resolve through the same query |
+
+**The one-line version for the customer:** GTM and LTM route based on *where* a server sits
+and whether a port answers. Consul routes based on *what* a service is and whether the
+application is actually healthy — and the same model spans every runtime, with no separate
+appliance tier in the data path.
+
+Each scenario below opens with an **At a glance** block that names exactly which Consul
+components are in play and which F5 capability it replaces or improves on.
 
 ---
 
@@ -39,6 +67,7 @@ all SSH commands depend on it.
 
 ```bash
 export KEY=vm/devops-keypair.pem
+export KEY_W2=vm/devops-keypair.pem   # us-west-2 VMs (Scenario C) — same key material
 
 export DC3_SERVER_PUB=$(terraform -chdir=terraform/dc3 output -raw consul_server_public_ip)
 export DC3_SERVER_PRIV=$(terraform -chdir=terraform/dc3 output -raw consul_server_private_ip)
@@ -91,10 +120,10 @@ curl -s "http://$DC3_SERVER_PUB:8500/v1/health/service/product-api?passing" | \
   python3 -c "import json,sys; s=json.load(sys.stdin); print('Passing on Site 1:', len(s))"
 # Expected: 3
 
-# All product-api instances passing on Site 2
-curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing" | \
+# All product-api instances passing on Site 2 (registered in hashicups namespace)
+curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing&ns=hashicups" | \
   python3 -c "import json,sys; s=json.load(sys.stdin); print('Passing on Site 2:', len(s))"
-# Expected: 3
+# Expected: 3 (ESM-monitored VMs in dc4-esm datacenter, hashicups namespace)
 ```
 
 ---
@@ -112,9 +141,10 @@ us-east-1 PRIMARY
     DNS NLB:    port 53 → Consul DNS 8600
 
   DC5 (EKS, admin partition dc5-k8s of DC3)
-    app layer:  frontend, public-api, payments (mesh, Connect sidecars)
-    mesh-gw:    cross-partition communication with DC3
-    term-gw:    reaches DC3's postgres across the partition boundary
+    full stack: postgres, product-api, payments, public-api, frontend (mesh, Connect sidecars)
+    nginx:      single entry point — API Gateway → nginx → frontend/public-api
+    mesh-gw:    cross-partition and cross-peer communication
+    term-gw:    external service egress
 
 us-west-2 FAILOVER
   DC4 (VMs) — Consul server, ESM external nodes
@@ -186,6 +216,16 @@ dark rather than cross regions.
 **The story:** Three product-api instances on Site 1 crash simultaneously — imagine a bad
 deployment or an OOM event. We want to show that traffic automatically reroutes to Site 2
 with no operator involvement and no application change.
+
+**At a glance**
+
+| | |
+|---|---|
+| **What's happening** | All three `product-api` VMs in the us-east-1 site fail; the shared DNS name `product-api-geo.query.consul.` transparently begins returning healthy us-west-2 instances instead. |
+| **Consul components** | Consul servers (DC3 + DC4), native Consul agent + Connect sidecar (Envoy) on each VM, **cluster peering** DC3↔DC4, **prepared query** `product-api-geo` with `Failover.Targets`, agent-level health checks, Consul DNS interface. |
+| **How it's accomplished** | The query filters on `OnlyPassing` health at resolve time and sorts by `Near: _agent`. When Site 1 returns zero passing instances, Consul walks to the next failover target — the `dc4-esm` **peer** — and returns its instances. The `Failovers` counter reports how many hops were taken. |
+| **Replaces / improves on** | An F5 **GTM** wide-IP with a two-DC pool and TCP health monitors. |
+| **Customer benefit** | Failover is keyed on *real application health*, not a port probe; there is no wide-IP or DNS record to touch; it is automatic in under 30 seconds; and the side-by-side `product-api-local` query proves you can also deliberately *contain* traffic to one site when cross-region bleed is not wanted. |
 
 ### Step 1 — Establish the baseline
 
@@ -270,6 +310,16 @@ serving again — with no manual step and no cache flush.
 partition. With a conventional single-server DNS setup, `.consul` queries simply time out.
 We've configured clients with a dual-server dnsmasq rule so they query both control planes
 in parallel. When Site 1 is silent, Site 2 answers in the same round trip.
+
+**At a glance**
+
+| | |
+|---|---|
+| **What's happening** | The Site 1 Consul **control plane** itself dies. `.consul` resolution keeps working because Site 2's independent control plane answers the identical query. |
+| **Consul components** | Redundant Consul servers per region, a per-DC **DNS NLB** (port 53 → Consul DNS 8600), `recursors` for non-`.consul` names, clients/bastion configured with **both** NLB IPs as nameservers (systemd-resolved), and a mirrored `product-api-geo` prepared query on Site 2. |
+| **How it's accomplished** | systemd-resolved lists both NLB IPs. When DC3's NLB stops answering, the resolver falls to DC4's NLB within ~2 seconds; DC4 runs its own copy of the query and answers from its local instances (`Failovers: 0`). |
+| **Replaces / improves on** | F5 **GTM** DNS-listener HA — a redundant GTM appliance pair or anycast'd DNS front end. |
+| **Customer benefit** | There is no single DNS "brain" to lose. The resolver never waits out a full timeout — the second control plane is a *parallel* answer path, not a cold standby that has to be promoted. |
 
 ### The dual-NLB DNS configuration
 
@@ -399,6 +449,16 @@ group is declarative: you define which partitions are equivalent once, and every
 those partitions gets the policy automatically. Adding a new service to DC6 doesn't require
 updating any query.
 
+**At a glance**
+
+| | |
+|---|---|
+| **What's happening** | DC4's VM `product-api` fails and traffic shifts to DC6's **Kubernetes** `product-api` — VM and K8s treated as one interchangeable service — with no prepared query involved. |
+| **Consul components** | Consul server DC4, **ESM** health-checking the DC4 VMs, admin **partition** `dc6-k8s`, the **catalog sync** controller mirroring DC6 K8s services into DC4's catalog, a **sameness group** config entry declaring `default` + `dc6-k8s` equivalent, and mesh gateways for cross-partition traffic. |
+| **How it's accomplished** | The sameness group makes same-named services across the two partitions one logical service. When DC4's instances go critical, resolution returns DC6's instances automatically — no target list to edit. |
+| **Replaces / improves on** | An F5 **GTM** GSLB pool spanning two data centers with manually maintained members and monitors. |
+| **Customer benefit** | Equivalence is declared once and is *identity-based*, not address-based; every service added to either partition later is covered with zero extra config; and it unifies completely different runtimes (VM and K8s) behind one policy. |
+
 ### Step 1 — Confirm the sameness group is active
 
 ```bash
@@ -410,12 +470,12 @@ curl -s "http://$DC4_SERVER_PUB:8500/v1/config/sameness-group/dc4-dc6-product-ap
 ### Step 2 — Confirm both partitions have passing product-api instances
 
 ```bash
-# DC4 default partition (VMs)
-curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing" | \
+# DC4 default partition (VMs — hashicups namespace)
+curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing&ns=hashicups" | \
   python3 -c "import json,sys; s=json.load(sys.stdin); print('DC4 VMs passing:', len(s))"
 
-# DC6 partition (K8s)
-curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing&partition=dc6-k8s" | \
+# DC6 partition (K8s — hashicups namespace mirrored from K8s)
+curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing&partition=dc6-k8s&ns=hashicups" | \
   python3 -c "import json,sys; s=json.load(sys.stdin); print('DC6 K8s passing:', len(s))"
 ```
 
@@ -433,7 +493,7 @@ automatically shifts traffic to DC6's K8s instances — no query update, no DNS 
 ### Step 4 — Confirm routing shifted to DC6
 
 ```bash
-curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing" | \
+curl -s "http://$DC4_SERVER_PUB:8500/v1/health/service/product-api?passing&ns=hashicups" | \
   python3 -c "
 import json,sys; s=json.load(sys.stdin)
 print('Passing instances:', len(s))
@@ -461,23 +521,32 @@ done
 
 > **Requires README Phases 10 and 13 (DC5 EKS mesh + DC5 prepared query).**
 
-**The story:** The HashiCups app layer runs in Kubernetes on DC5 — containerised, with
-Envoy sidecars and Connect mesh. The data layer (postgres, product-api) stays on DC3 VMs.
-DC5 is an admin partition of DC3, sharing its control plane. When the K8s app services
-fail, a prepared query registered in the dc5-k8s partition falls back to DC4's VM-based
-equivalents via cluster peering — the same mechanism as Scenario A, but now the primary is
-K8s rather than VM.
+**The story:** DC5 runs the full HashiCups stack in Kubernetes — postgres, product-api,
+payments, public-api, frontend, all with Envoy sidecars and Connect mesh. DC5 is an admin
+partition of DC3, sharing its control plane. When product-api fails in DC5, a prepared
+query registered in the dc5-k8s partition falls back to DC4's VM-based instances via
+cluster peering — the same mechanism as Scenario A, but now the primary is K8s rather than VM.
 
 **What this shows:** Consul treats K8s services and VM services as first-class citizens in
 the same catalog. A service registered by a K8s pod and a service registered by a VM agent
 are indistinguishable to a prepared query. The failover works because the service *name* is
 what matters, not the runtime environment.
 
+**At a glance**
+
+| | |
+|---|---|
+| **What's happening** | DC5's full HashiCups stack runs in Kubernetes with Connect sidecars. When its `product-api` fails, a prepared query registered *inside the K8s admin partition* fails over to DC4's VM instances across a peer. |
+| **Consul components** | consul-k8s / consul-dataplane on EKS, admin **partition** `dc5-k8s` of DC3 (shared control plane via `externalServers`), Connect **sidecars**, **mesh gateways**, **cluster peering** DC5↔DC4, and the `product-api-hybrid` **prepared query** scoped to the partition. |
+| **How it's accomplished** | The query runs in the `dc5-k8s` partition using the K8s readiness probe as the health signal. On zero passing pods it walks to the `dc4-esm` peer target and returns VM instances — the same failover machinery as Scenario A, now with a K8s primary. |
+| **Replaces / improves on** | Two F5 tiers at once — **LTM** balancing inside the cluster *and* **GTM** across data centers — collapsed into a single query. |
+| **Customer benefit** | K8s and VM are indistinguishable to the failover logic; the service *name* is the contract, not the runtime; and one construct spans both local load balancing and global failover. |
+
 ### Step 1 — Confirm DC5 K8s services are registered and passing
 
 ```bash
 # K8s services are visible in DC3's Consul UI under the dc5-k8s partition
-curl -s "http://$DC3_SERVER_PUB:8500/v1/health/service/product-api?passing&partition=dc5-k8s" | \
+curl -s "http://$DC3_SERVER_PUB:8500/v1/health/service/product-api?passing&partition=dc5-k8s&ns=hashicups" | \
   python3 -c "import json,sys; s=json.load(sys.stdin); print('DC5 K8s passing:', len(s))"
 ```
 
@@ -499,7 +568,7 @@ for n in r['Nodes']: print(' ', n['Node']['Node'], '@', n['Service']['Address'])
 ### Step 3 — Stop product-api pods in DC5
 
 ```bash
-kubectl --context dc5 scale deployment product-api --replicas=0
+kubectl scale deployment product-api -n hashicups --replicas=0 --context dc5
 ```
 
 Within 15 seconds the K8s readiness probe fails, the service goes critical in Consul, and
@@ -519,13 +588,108 @@ for n in r['Nodes']: print(' ', n['Node']['Node'], '@', n['Service']['Address'])
 ### Step 5 — Restore DC5
 
 ```bash
-kubectl --context dc5 scale deployment product-api --replicas=3
+kubectl scale deployment product-api -n hashicups --replicas=3 --context dc5
 ```
 
 > **Key point for the customer:** DC5 is an admin partition of DC3 — it shares the control
 > plane but has its own service registry scope. The prepared query is registered in that
 > partition and fails over to a peer. The runtime (K8s vs VM) is invisible to the failover
 > logic. Consul sees service names and health checks, not container runtimes.
+
+---
+
+## Scenario E — Cross-Cluster Frontend Failover (Mesh → Non-Mesh)
+
+> **Requires README Phases 10, 11, 13, and 14 (DC5 + DC6 EKS + ESM frontend registration).**
+
+**The story:** DC5 exposes its frontend via the Consul API Gateway NLB. ESM in DC3 monitors
+that NLB as an external node. A prepared query `frontend-geo` on DC3 resolves the DC5 NLB
+as the primary endpoint. When DC5's frontend goes critical, the query fails over to DC6's
+NLB — which runs the same frontend in a non-mesh Kubernetes cluster. DC6's NLB is
+registered directly in DC3's Consul catalog (no cross-peer hop), so failover is a local
+partition lookup, not a peer traversal. The client never changes its DNS query.
+
+**What this shows:** ESM and prepared queries are runtime-agnostic. DC5 is a full Connect
+mesh cluster; DC6 has no mesh at all. To Consul, both are just health-checked external
+endpoints. The failover works identically — whether the backend is a mesh pod, a VM, or a
+catalog-synced K8s service.
+
+This is the "last mile" scenario: it demonstrates that Consul's geo-failover pattern applies
+all the way up the stack, including the frontend tier, across completely different deployment
+models.
+
+**At a glance**
+
+| | |
+|---|---|
+| **What's happening** | DC5's mesh frontend (behind the Consul API Gateway NLB) fails, and the same DNS name fails over to DC6's frontend NLB — a **non-mesh** Kubernetes cluster. |
+| **Consul components** | **Consul API Gateway** (DC5 entry point), **ESM** monitoring the NLB HTTP endpoints as external nodes, direct **catalog registration** of the DC6 NLB in DC3's default partition, the `frontend-geo` **prepared query**, and the **terminating gateway** for external egress. |
+| **How it's accomplished** | ESM health-checks each NLB's HTTP endpoint. The query resolves the DC5 NLB first and the DC6 NLB on failover; because DC6's NLB is registered directly in DC3's catalog, that failover is a local partition lookup, not a peer hop. |
+| **Replaces / improves on** | An F5 **GTM** wide-IP fronting a VIP in each data center, with the LTM VIPs handling entry. |
+| **Customer benefit** | The pattern is runtime-agnostic to the very last mile — mesh vs non-mesh, pod vs VM vs raw NLB all look identical to the query — so the front-door tier gets the exact same health-aware geo-failover as the backends, with no bespoke config. |
+
+### Step 1 — Confirm both frontend NLBs are registered and passing
+
+```bash
+# DC5 api-gateway NLB — ESM-monitored in DC3 (dc5-k8s partition, hashicups ns)
+curl -s "http://$DC3_SERVER_PUB:8500/v1/health/service/frontend?passing&partition=dc5-k8s&ns=hashicups" | \
+  python3 -c "import json,sys; s=json.load(sys.stdin); print('DC5 NLB passing:', len(s), '(expect 1+)')"
+
+# DC6 frontend NLB — registered directly in DC3's default partition (hashicups ns)
+curl -s "http://$DC3_SERVER_PUB:8500/v1/health/service/frontend?passing&ns=hashicups" | \
+  python3 -c "import json,sys; s=json.load(sys.stdin); print('DC6 NLB in DC3 default passing:', len(s), '(expect 1)')"
+
+# Baseline — frontend-geo resolves DC5 NLB (Failovers: 0)
+curl -s "http://$DC3_SERVER_PUB:8500/v1/query/frontend-geo/execute" | \
+  python3 -c "
+import json,sys; r=json.load(sys.stdin)
+print('Failovers:', r['Failovers'], ' ← 0 = DC5 NLB serving')
+for n in r['Nodes']: print(' ', n['Service']['Address'])
+"
+```
+
+### Step 2 — Open the HashiCups UI via the DC5 NLB
+
+The prepared query resolves the DC5 NLB address. Open it in a browser — confirm products load.
+This is the mesh-backed frontend, running full Connect with nginx as the entry point.
+
+### Step 3 — Take down DC5 frontend
+
+```bash
+kubectl scale deployment frontend -n hashicups --replicas=0 --context dc5
+```
+
+ESM's health check on the DC5 NLB will flip to critical within 10–30 seconds.
+
+### Step 4 — Observe failover to DC6 (non-mesh)
+
+```bash
+# Failovers: 1 — DC6 NLB now returned
+curl -s "http://$DC3_SERVER_PUB:8500/v1/query/frontend-geo/execute" | \
+  python3 -c "
+import json,sys; r=json.load(sys.stdin)
+print('Failovers:', r['Failovers'], ' ← 1 = DC6 NLB serving')
+for n in r['Nodes']: print(' ', n['Service']['Address'])
+"
+```
+
+The DNS name is unchanged. The address returned is now DC6's NLB — a completely different
+K8s cluster with no service mesh. Open it in a browser; HashiCups loads from DC6.
+
+### Step 5 — Restore DC5
+
+```bash
+kubectl scale deployment frontend -n hashicups --replicas=1 --context dc5
+```
+
+Within 30 seconds ESM's check passes, the prepared query returns to DC5, and `Failovers`
+drops back to `0`.
+
+> **Key point for the customer:** The query `frontend-geo` doesn't know that DC5 is
+> mesh-enabled and DC6 is not. ESM monitors an HTTP health endpoint on each NLB — the
+> Kubernetes implementation underneath is irrelevant. The same prepared query pattern you
+> used for VMs in Scenario A works unchanged for K8s NLBs in Scenario E. Consul's
+> geo-failover is infrastructure-agnostic end to end.
 
 ---
 
@@ -538,6 +702,9 @@ kubectl --context dc5 scale deployment product-api --replicas=3
 | `product-api-geo.query.consul.` | DC3 (Site 1) | Site 1 first, fails over to dc4-esm peer |
 | `product-api-geo.query.consul.` | DC4 (Site 2) | Site 2 first, peers back to dc3-vm |
 | `product-api-local.query.consul.` | DC3 only | Site 1 only — returns empty when Site 1 is down |
+| `product-api-hybrid.query.consul.` | DC3 (dc5-k8s partition) | DC5 K8s first, fails over to DC4 VM peer |
+| `frontend-geo.query.consul.` | DC3 | DC5 api-gateway NLB first (dc5-k8s partition), fails over to DC6 NLB (DC3 default partition) |
+| `frontend-geo.query.consul.` | DC4 (dc6-k8s partition) | DC6 NLB first (dc6-k8s), fails over to DC4 VM frontend (default partition) |
 
 Queries run against port **8600** on the Consul server. From outside the VPC, use `+tcp`
 (UDP 8600 is restricted to VPC traffic):

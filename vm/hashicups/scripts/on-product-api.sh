@@ -9,15 +9,17 @@ source "${SCRIPT_DIR}/lib.sh"
 install -d -m 0755 /opt/hashicups
 cat >/opt/hashicups/product-api-config.json <<'EOF'
 {
-  "db_connection": "host=host.docker.internal port=15432 user=postgres password=password dbname=products sslmode=disable"
+  "db_connection": "host=localhost port=15432 user=postgres password=password dbname=products sslmode=disable",
+  "bind_address": ":9090",
+  "metrics_address": ":9103"
 }
 EOF
 
 docker rm -f product-api 2>/dev/null || true
+# --network host (canonical pattern): product-api reaches its postgres Connect upstream
+# on localhost:15432 (sidecar local_bind). No -p / no host.docker.internal needed.
 docker run -d --name product-api --restart unless-stopped \
-  "${DNS_FLAGS[@]}" \
-  "${DOCKER_HOST_GATEWAY_FLAGS[@]}" \
-  -p 9090:9090 \
+  --network host \
   -v /opt/hashicups/product-api-config.json:/config/config.json:ro \
   -e CONFIG_FILE=/config/config.json \
   hashicorpdemoapp/product-api:v4280cf7

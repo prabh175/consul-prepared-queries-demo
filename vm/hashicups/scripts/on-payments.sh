@@ -5,9 +5,9 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 docker rm -f payments 2>/dev/null || true
+# --network host (canonical pattern)
 docker run -d --name payments --restart unless-stopped \
-  "${DNS_FLAGS[@]}" \
-  -p 8080:8080 \
+  --network host \
   -e BIND_ADDRESS=0.0.0.0:8080 \
   hashicorpdemoapp/payments:latest
 

@@ -2,70 +2,96 @@
 # Register prepared queries on Consul servers.
 #
 # Scenarios covered:
-#   DC3  — product-api-geo (DC3 primary → DC4 peer failover). Scenarios A, B.
-#   DC4  — product-api-geo (DC4 primary → DC3 peer failover). Scenarios A, B.
-#   DC5  — product-api-hybrid (dc5-k8s primary → DC4 peer failover). Scenario D.
-#          Registered in the dc5-k8s admin partition via X-Consul-Partition header.
+#   DC3  — product-api-geo   (Scenarios A, B): DC3 primary → DC4 peer failover.
+#   DC3  — product-api-hybrid (Scenario D):   DC5 K8s primary → DC4 VM peer failover.
+#                                             CONSUL_HTTP_ADDR must point to DC3 server.
+#   DC3  — frontend-geo      (Scenario E):    DC5 K8s NLB primary → DC6 K8s NLB fallback.
+#                                             Register AFTER vm/scripts/register-esm-frontends.sh.
+#   DC4  — product-api-geo   (Scenarios A, B): DC4 primary → DC3 peer failover.
+#   DC4  — frontend-geo      (Scenario E):    DC6 K8s NLB primary → DC4 VM frontend fallback.
+#                                             Register AFTER vm/scripts/register-esm-frontends.sh.
 #
 # Usage:
-#   # On DC3 server:
-#   bash register-queries.sh
+#   # DC3 product-api queries (Scenarios A, B):
+#   CONSUL_HTTP_ADDR=http://$DC3_SERVER_PUB:8500 bash prepared-queries/register-queries.sh
 #
-#   # On DC4 server:
-#   CONSUL_HTTP_ADDR=http://<DC4_SERVER_IP>:8500 DC=dc4 bash register-queries.sh
+#   # DC4 product-api queries (Scenarios A, B):
+#   CONSUL_HTTP_ADDR=http://$DC4_SERVER_PUB:8500 DC=dc4 bash prepared-queries/register-queries.sh
 #
-#   # For DC5 partition (after consul-k8s is up, using DC3 as the control plane):
-#   CONSUL_HTTP_ADDR=http://<DC3_SERVER_IP>:8500 DC=dc5 bash register-queries.sh
+#   # DC5 product-api-hybrid (Scenario D) — registered in dc5-k8s partition on DC3 server:
+#   CONSUL_HTTP_ADDR=http://$DC3_SERVER_PUB:8500 DC=dc5 bash prepared-queries/register-queries.sh
+#
+#   # DC3 frontend-geo (Scenario E) — requires ESM registrations to exist first:
+#   CONSUL_HTTP_ADDR=http://$DC3_SERVER_PUB:8500 DC=dc3-frontend bash prepared-queries/register-queries.sh
+#
+#   # DC4 frontend-geo (Scenario E) — registered in dc6-k8s partition, requires ESM first:
+#   CONSUL_HTTP_ADDR=http://$DC4_SERVER_PUB:8500 DC=dc4-frontend bash prepared-queries/register-queries.sh
 #
 # Env:
 #   CONSUL_HTTP_ADDR   Consul HTTP endpoint (default: http://127.0.0.1:8500)
-#   DC                 Which DC to register for: dc3 (default), dc4, or dc5
+#   DC                 dc3 (default), dc4, dc5, dc3-frontend, dc4-frontend
 set -euo pipefail
 
 CONSUL_ADDR="${CONSUL_HTTP_ADDR:-http://127.0.0.1:8500}"
 DC="${DC:-dc3}"
+CONSUL_TOKEN="${CONSUL_HTTP_TOKEN:-}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 register_query() {
   local file="$1"
-  local extra_headers="${2:-}"
+  local partition_header="${2:-}"
   local name
   name=$(python3 -c "import json,sys; print(json.load(open('$file'))['Name'])")
   echo "  Registering: ${name} (from ${file##*/})"
-  # shellcheck disable=SC2086
+  local -a extra=()
+  [[ -n "$partition_header" ]] && extra+=(-H "$partition_header")
+  [[ -n "$CONSUL_TOKEN" ]] && extra+=(-H "X-Consul-Token: $CONSUL_TOKEN")
   curl -fsS -X POST "${CONSUL_ADDR}/v1/query" \
     -H "Content-Type: application/json" \
-    ${extra_headers} \
+    ${extra[@]+"${extra[@]}"} \
     -d @"${file}"
   echo ""
 }
 
 echo "==> Registering prepared queries on ${CONSUL_ADDR} (DC=${DC})"
 
-if [[ "${DC}" == "dc4" ]]; then
-  # DC4: geo query prefers DC4-local instances, peers to DC3 on failure
-  register_query "${SCRIPT_DIR}/product-api-geo-dc4.json"
+case "${DC}" in
+  dc4)
+    # DC4: geo query prefers DC4-local product-api, peers to DC3 on failure
+    register_query "${SCRIPT_DIR}/product-api-geo-dc4.json"
+    ;;
 
-elif [[ "${DC}" == "dc5" ]]; then
-  # DC5 (dc5-k8s partition of dc3-vm): hybrid query targeting K8s product-api
-  # with fallback to DC4 peer. Registered under X-Consul-Partition: dc5-k8s.
-  register_query "${SCRIPT_DIR}/product-api-hybrid.json" \
-    '-H "X-Consul-Partition: dc5-k8s"'
+  dc3-frontend)
+    # DC3: Scenario E frontend query — registered in dc5-k8s partition so dc5-frontend-nlb
+    # is the primary. Failover target is default partition (dc6-frontend-nlb).
+    # Register AFTER vm/scripts/register-esm-frontends.sh.
+    register_query "${SCRIPT_DIR}/frontend-geo-dc3.json" "X-Consul-Partition: dc5-k8s"
+    ;;
 
-else
-  # DC3 (default): geo query prefers DC3-local instances, peers to DC4 on failure
-  register_query "${SCRIPT_DIR}/product-api-geo-failover.json"
-  register_query "${SCRIPT_DIR}/product-api-local-only.json"
-fi
+  dc5)
+    # DC5 (dc5-k8s partition on DC3 server): Scenario D — DC5 K8s product-api primary,
+    # fails over to DC4 VM product-api via dc4-peer cluster peer.
+    # CONSUL_HTTP_ADDR must point to DC3 server ($DC3_SERVER_PUB:8500).
+    register_query "${SCRIPT_DIR}/product-api-hybrid.json" "X-Consul-Partition: dc5-k8s"
+    ;;
+
+  dc4-frontend)
+    # DC4 dc6-k8s partition: Scenario E frontend query — DC6 K8s frontend primary,
+    # DC4 VM frontend fallback. Registered in dc6-k8s partition so DC6 NLB is primary.
+    # Register AFTER vm/scripts/register-esm-frontends.sh.
+    register_query "${SCRIPT_DIR}/frontend-geo-dc4.json" "X-Consul-Partition: dc6-k8s"
+    ;;
+
+  dc3|*)
+    # DC3 (default): Scenarios A+B product-api geo queries
+    register_query "${SCRIPT_DIR}/product-api-geo-failover.json"
+    register_query "${SCRIPT_DIR}/product-api-local-only.json"
+    ;;
+esac
 
 echo "==> Done. Verify:"
-echo "  curl -s ${CONSUL_ADDR}/v1/query | python3 -m json.tool"
+echo "  curl -s ${CONSUL_ADDR}/v1/query | python3 -c \"import json,sys; [print(q['Name']) for q in json.load(sys.stdin)]\""
 echo ""
-echo "DNS (from a node with Consul DNS on :8600):"
+echo "DNS test (from a node with Consul DNS on :8600):"
 echo "  dig @127.0.0.1 -p 8600 product-api-geo.query.consul. SRV +short"
-echo ""
-if [[ "${DC}" == "dc3" ]]; then
-  echo "Next steps:"
-  echo "  Register on DC4: CONSUL_HTTP_ADDR=http://<DC4_IP>:8500 DC=dc4 bash register-queries.sh"
-  echo "  Register on DC5: CONSUL_HTTP_ADDR=http://<DC3_IP>:8500 DC=dc5 bash register-queries.sh"
-fi
+echo "  dig @127.0.0.1 -p 8600 frontend-geo.query.consul. SRV +short"
